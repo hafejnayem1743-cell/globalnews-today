@@ -1,4 +1,4 @@
-name = "globalnews-today-api"
+name = "globalnews-news-collector"
 main = "worker/index.ts"
 compatibility_date = "2026-09-19"
 
