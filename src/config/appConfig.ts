@@ -7,9 +7,9 @@ export const APP_CONFIG = {
   description: 'Independent international news portal delivering breaking coverage, world analysis, business, technology, AI, and science for global English-speaking audiences.',
   contactEmail: 'editor@globalnewstoday.com',
   edition: 'International Edition',
-  apiBaseUrl: (import.meta.env.VITE_NEWS_API_URL || '').replace(/\/$/, ''),
+  apiBaseUrl: (import.meta.env.VITE_NEWS_API_URL || 'https://globalnews-news-collector.hafejnayem1743.workers.dev').replace(/\/$/, ''),
   useDemoData: import.meta.env.VITE_USE_DEMO_DATA === 'true',
-  version: '1.7.0',
+  version: '1.8.0',
 };
 
 export const CATEGORIES_CONFIG: Array<{

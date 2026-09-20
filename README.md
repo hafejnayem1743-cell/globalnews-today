@@ -1,4 +1,4 @@
-# GlobalNews Today v1.5
+# GlobalNews Today v1.8
 
 Premium English international news website with a Bengali-only admin panel.
 
@@ -42,9 +42,9 @@ npm install
 npm run build
 ```
 
-For local API mode, configure `ADMIN_EMAIL` and `ADMIN_PASSWORD` in the environment before starting the Express server.
+For Cloudflare production admin authentication, configure only `ADMIN_PASSWORD` and `ADMIN_SECRET` as Worker secrets. The production frontend never contains either value.
 
-## v1.7 Admin API Fix
+## v1.8 Admin API and Cloudflare deployment fix
 
 Admin authentication is handled by the Cloudflare Worker.
 
@@ -61,3 +61,12 @@ Worker configuration uses:
 - KV namespace ID: `5cd9bc731aad4577ac3b58b5f9419ffc`
 
 Set secrets with Cloudflare Wrangler or the Cloudflare Dashboard Variables and Secrets UI. Never place real secret values in source control.
+
+## v1.8 deployment notes
+
+- The production frontend defaults to `https://globalnews-news-collector.hafejnayem1743.workers.dev` for API requests when `VITE_NEWS_API_URL` is not provided.
+- `ADMIN_PASSWORD` and `ADMIN_SECRET` are read only from the Cloudflare Worker environment.
+- `/api/admin/login` returns JSON for success, authentication failure, invalid JSON, missing secrets, unsupported methods, and CORS preflight.
+- Admin bearer tokens are HMAC-SHA-256 signed and expire after 12 hours.
+- The Worker keeps the existing RSS feeds, KV namespace, public APIs, manual collector authentication, and 30-minute scheduled collector.
+- `bun.lock` is intentionally absent; use npm/package-lock for the Pages build.

@@ -110,20 +110,30 @@ async function readJsonBody(request:Request):Promise<any>{
   try{return JSON.parse(text);}catch{return null;}
 }
 
+async function safeSecretEqual(left:string,right:string):Promise<boolean>{
+  const a=new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(left)));
+  const b=new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(right)));
+  if(a.length!==b.length) return false;
+  let diff=0;
+  for(let i=0;i<a.length;i++) diff|=a[i]^b[i];
+  return diff===0;
+}
+
 async function adminLogin(request:Request,env:Env):Promise<Response>{
   if(!env.ADMIN_SECRET || !env.ADMIN_PASSWORD){
     return Response.json({success:false,message:'Admin secrets are not configured.'},{status:503,headers:HEADERS});
   }
   const body=await readJsonBody(request);
-  if(body===null){
+  if(body===null || typeof body!=='object' || Array.isArray(body)){
     return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
   }
-  const password=String(body?.password||'');
-  if(!password || password!==env.ADMIN_PASSWORD){
+  const password=typeof body.password==='string' ? body.password : '';
+  if(!password || !(await safeSecretEqual(password,env.ADMIN_PASSWORD))){
     return Response.json({success:false,message:'Invalid admin password.'},{status:401,headers:HEADERS});
   }
   const expiresIn=12*60*60*1000;
-  const payload=base64UrlEncode(JSON.stringify({typ:'admin',iat:Date.now(),exp:Date.now()+expiresIn}));
+  const now=Date.now();
+  const payload=base64UrlEncode(JSON.stringify({typ:'admin',iat:now,exp:now+expiresIn}));
   const token=await signAdminToken(payload,env.ADMIN_SECRET);
   return Response.json({success:true,token,expiresIn},{headers:HEADERS});
 }
@@ -136,7 +146,7 @@ function normalizeAdminArticle(input:any,existing?:Article):Article{const now=ne
 async function collect(env:Env) {
   const existing=await getArticles(env); const urls=new Set(existing.map(a=>a.sourceUrl?.trim().toLowerCase())); const titles=new Set(existing.map(a=>norm(a.title))); let fetched=0,newCount=0,dupes=0; const failed:string[]=[]; const additions:Article[]=[];
   for(const feed of FEEDS){
-    try { const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),8000); const r=await fetch(feed.url,{signal:ctl.signal,headers:{'User-Agent':'GlobalNewsToday/1.5 RSS collector; contact newsroom via site'}}); clearTimeout(timer); if(!r.ok) throw new Error(`HTTP ${r.status}`); const xml=await r.text(); const parsed=parseFeed(xml,feed); fetched+=parsed.length;
+    try { const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),8000); const r=await fetch(feed.url,{signal:ctl.signal,headers:{'User-Agent':'GlobalNewsToday/1.8 RSS collector; contact newsroom via site'}}); clearTimeout(timer); if(!r.ok) throw new Error(`HTTP ${r.status}`); const xml=await r.text(); const parsed=parseFeed(xml,feed); fetched+=parsed.length;
       for(const a of parsed){const u=a.sourceUrl.toLowerCase().trim(),t=norm(a.title); if(urls.has(u)||titles.has(t)){dupes++;continue;} urls.add(u);titles.add(t);additions.push(a);newCount++;}
     } catch { failed.push(feed.name); }
   }
@@ -162,7 +172,10 @@ export default {
         return Response.json({success:true,data},{headers:HEADERS});
       }
 
-      if(path==='/api/admin/login' && request.method==='POST') return await adminLogin(request,env);
+      if(path==='/api/admin/login'){
+        if(request.method!=='POST') return Response.json({success:false,message:'Method not allowed.'},{status:405,headers:{...HEADERS,'Allow':'POST, OPTIONS'}});
+        return await adminLogin(request,env);
+      }
 
       if(path.startsWith('/api/admin/')){
         if(!(await adminTokenFromRequest(request,env))){
@@ -214,7 +227,7 @@ export default {
           }
         }
 
-        return Response.json({success:false,message:'Admin endpoint not found.'},{status:404,headers:HEADERS});
+        return Response.json({success:false,message:'Method not allowed for this admin endpoint.'},{status:405,headers:{...HEADERS,'Allow':'GET, POST, PUT, DELETE, OPTIONS'}});
       }
 
       const articles=()=>getArticles(env);

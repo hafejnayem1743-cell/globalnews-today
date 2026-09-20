@@ -9,4 +9,5 @@ crons = ["*/30 * * * *"]
 binding = "NEWS_KV"
 id = "5cd9bc731aad4577ac3b58b5f9419ffc"
 
-# ADMIN_PASSWORD and ADMIN_SECRET must be configured as Cloudflare secrets.
+# Configure ADMIN_PASSWORD and ADMIN_SECRET as Cloudflare Worker secrets.
+# Secret values are intentionally not stored in this repository.

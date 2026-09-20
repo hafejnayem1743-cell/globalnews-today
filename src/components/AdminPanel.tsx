@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Article, NewsCategory, NewsCountry } from '../types/news';
 import { Plus, Pencil, Trash2, LogOut, Newspaper, Search, X, Save, Eye, Star, Zap, RefreshCw, Sun, Moon, CheckCircle2, EyeOff } from 'lucide-react';
 
-const API = (import.meta.env.VITE_NEWS_API_URL || '').replace(/\/$/, '');
+const API = (import.meta.env.VITE_NEWS_API_URL || 'https://globalnews-news-collector.hafejnayem1743.workers.dev').replace(/\/$/, '');
 const TOKEN_KEY = 'gnt_admin_token';
 const categories: NewsCategory[] = ['US','UK','World','Canada','Australia','Business','Technology','AI','Science','Health','Sports','Entertainment','Politics','Lifestyle','Travel','Weather','Trending'];
 const countries: NewsCountry[] = ['United States','United Kingdom','Canada','Australia','New Zealand','Singapore','World','International'];
