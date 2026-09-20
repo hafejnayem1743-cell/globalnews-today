@@ -1,0 +1,13 @@
+name = "globalnews-today-api"
+main = "worker/index.ts"
+compatibility_date = "2026-09-19"
+
+[triggers]
+crons = ["*/30 * * * *"]
+
+[[kv_namespaces]]
+binding = "NEWS_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+# Set ADMIN_SECRET in Cloudflare dashboard/secret store, not in source control.

@@ -1,0 +1,6 @@
+{
+  "name": "GlobalNews Today",
+  "description": "News From Around the World - International English news portal covering breaking stories, world affairs, business, technology, AI, and science.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
