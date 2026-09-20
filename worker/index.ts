@@ -50,14 +50,83 @@ function dedupeArticles(list:Article[]):Article[]{
   });
 }
 async function getArticles(env:Env):Promise<Article[]> { return dedupeArticles((await env.NEWS_KV.get('articles','json')) || []); }
-async function saveArticles(env:Env, articles:Article[]) { const clean=dedupeArticles(articles); await env.NEWS_KV.put('articles',JSON.stringify(clean.slice(0,5000))); await env.NEWS_KV.put('collector_status',JSON.stringify({status:'ONLINE',lastSync:new Date().toISOString(),totalArticles:Math.min(articles.length,5000),newArticlesLastSync:0,duplicateArticlesPrevented:0,sourcesCount:FEEDS.length,activeSources:FEEDS.length,failedSources:0})); }
+async function saveArticles(env:Env, articles:Article[]) { const clean=dedupeArticles(articles); await env.NEWS_KV.put('articles',JSON.stringify(clean.slice(0,5000))); }
 
 const encoder=new TextEncoder();
-const bytesToHex=(b:ArrayBuffer)=>Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('');
-async function signAdminToken(payload:string,secret:string){const key=await crypto.subtle.importKey('raw',encoder.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);const sig=await crypto.subtle.sign('HMAC',key,encoder.encode(payload));return `${payload}.${bytesToHex(sig)}`;}
-async function verifyAdminToken(token:string,env:Env){try{if(!env.ADMIN_SECRET||!env.ADMIN_PASSWORD)return false;const [payload,sig]=token.split('.');if(!payload||!sig)return false;const expected=await signAdminToken(payload,env.ADMIN_SECRET);if(expected.split('.')[1]!==sig)return false;const data=JSON.parse(atob(payload));return data.exp>Date.now();}catch{return false;}}
-async function adminTokenFromRequest(request:Request,env:Env){const h=request.headers.get('Authorization')||'';const token=h.startsWith('Bearer ')?h.slice(7).trim():'';return token&&await verifyAdminToken(token,env);}
-async function adminLogin(request:Request,env:Env){if(!env.ADMIN_SECRET||!env.ADMIN_PASSWORD)return Response.json({success:false,message:'Admin secrets are not configured.'},{status:503,headers:HEADERS});const body=await request.json().catch(()=>({}));const password=String(body?.password||'');if(password!==env.ADMIN_PASSWORD)return Response.json({success:false,message:'Invalid admin password.'},{status:401,headers:HEADERS});const payload=btoa(JSON.stringify({exp:Date.now()+12*60*60*1000}));const token=await signAdminToken(payload,env.ADMIN_SECRET);return Response.json({success:true,token,expiresIn:12*60*60*1000},{headers:HEADERS});}
+const decoder=new TextDecoder();
+
+function base64UrlEncode(value:string):string{
+  const bytes=encoder.encode(value);
+  let binary='';
+  for(const byte of bytes) binary+=String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+function base64UrlDecode(value:string):string{
+  const normalized=value.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-value.length%4)%4);
+  const binary=atob(normalized);
+  const bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
+  return decoder.decode(bytes);
+}
+
+async function importAdminKey(secret:string,usage:KeyUsage[]):Promise<CryptoKey>{
+  return crypto.subtle.importKey('raw',encoder.encode(secret),{name:'HMAC',hash:'SHA-256'},false,usage);
+}
+
+async function signAdminToken(payload:string,secret:string):Promise<string>{
+  const key=await importAdminKey(secret,['sign']);
+  const signature=await crypto.subtle.sign('HMAC',key,encoder.encode(payload));
+  let binary='';
+  for(const byte of new Uint8Array(signature)) binary+=String.fromCharCode(byte);
+  return `${payload}.${btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}`;
+}
+
+async function verifyAdminToken(token:string,env:Env):Promise<boolean>{
+  try{
+    if(!env.ADMIN_SECRET) return false;
+    const parts=token.split('.');
+    if(parts.length!==2) return false;
+    const [payload,signature]=parts;
+    const data=JSON.parse(base64UrlDecode(payload));
+    if(data?.typ!=='admin' || typeof data.exp!=='number' || data.exp<=Date.now()) return false;
+    const normalized=signature.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-signature.length%4)%4);
+    const binary=atob(normalized);
+    const sigBytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
+    const key=await importAdminKey(env.ADMIN_SECRET,['verify']);
+    return await crypto.subtle.verify('HMAC',key,sigBytes,encoder.encode(payload));
+  }catch{return false;}
+}
+
+async function adminTokenFromRequest(request:Request,env:Env):Promise<boolean>{
+  const header=request.headers.get('Authorization')||'';
+  if(!header.startsWith('Bearer ')) return false;
+  const token=header.slice(7).trim();
+  return Boolean(token)&&await verifyAdminToken(token,env);
+}
+
+async function readJsonBody(request:Request):Promise<any>{
+  const text=await request.text();
+  if(!text.trim()) return {};
+  try{return JSON.parse(text);}catch{return null;}
+}
+
+async function adminLogin(request:Request,env:Env):Promise<Response>{
+  if(!env.ADMIN_SECRET || !env.ADMIN_PASSWORD){
+    return Response.json({success:false,message:'Admin secrets are not configured.'},{status:503,headers:HEADERS});
+  }
+  const body=await readJsonBody(request);
+  if(body===null){
+    return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+  }
+  const password=String(body?.password||'');
+  if(!password || password!==env.ADMIN_PASSWORD){
+    return Response.json({success:false,message:'Invalid admin password.'},{status:401,headers:HEADERS});
+  }
+  const expiresIn=12*60*60*1000;
+  const payload=base64UrlEncode(JSON.stringify({typ:'admin',iat:Date.now(),exp:Date.now()+expiresIn}));
+  const token=await signAdminToken(payload,env.ADMIN_SECRET);
+  return Response.json({success:true,token,expiresIn},{headers:HEADERS});
+}
 
 function publicArticle(a:Article){const {source:_source,sourceUrl:_sourceUrl,...publicFields}=a;return {...publicFields,source:'',sourceUrl:'',author:'GlobalNews Today'};}
 function publicArticles(list:Article[]){return list.map(publicArticle);}
@@ -79,26 +148,127 @@ async function collect(env:Env) {
 
 export default {
   async fetch(request:Request,env:Env,ctx:ExecutionContext){
-    if(request.method==='OPTIONS') return new Response(null,{headers:HEADERS});
-    const url=new URL(request.url), path=url.pathname;
-    if(path==='/api/health') return Response.json({status:'ok',service:'GlobalNews Today Cloudflare Worker API',timestamp:new Date().toISOString()},{headers:HEADERS});
-    if(path==='/api/collector/status') return Response.json({success:true,data:(await env.NEWS_KV.get('collector_status','json'))||{status:'STANDBY',totalArticles:0}},{headers:HEADERS});
-    if(path==='/api/admin/login' && request.method==='POST') return adminLogin(request,env);
-    if(path.startsWith('/api/admin/')){
-      if(!(await adminTokenFromRequest(request,env))) return Response.json({success:false,message:'Unauthorized admin session.'},{status:401,headers:HEADERS});
-      if(path==='/api/admin/articles' && request.method==='GET'){const all=await getArticles(env);const limit=Math.min(Number(url.searchParams.get('limit')||1000),1000);return Response.json({success:true,data:all.slice(0,limit),total:all.length},{headers:HEADERS});}
-      if(path==='/api/admin/articles' && request.method==='POST'){const body=await request.json().catch(()=>({}));if(!String(body?.title||'').trim())return Response.json({success:false,message:'Headline is required.'},{status:400,headers:HEADERS});const all=await getArticles(env);let a=normalizeAdminArticle(body);if(all.some(x=>x.slug===a.slug))a.slug=`${a.slug}-${Date.now().toString(36)}`;const merged=[a,...all].sort((x,y)=>Date.parse(y.publishedAt)-Date.parse(x.publishedAt)).slice(0,5000);await saveArticles(env,merged);return Response.json({success:true,data:a},{status:201,headers:HEADERS});}
-      if(path.startsWith('/api/admin/articles/') && request.method==='PUT'){const id=decodeURIComponent(path.split('/').pop()||'');const all=await getArticles(env);const i=all.findIndex(x=>x.id===id);if(i<0)return Response.json({success:false,message:'Article not found.'},{status:404,headers:HEADERS});const body=await request.json().catch(()=>({}));let a=normalizeAdminArticle(body,all[i]);if(all.some((x,idx)=>idx!==i&&x.slug===a.slug))a.slug=`${a.slug}-${Date.now().toString(36)}`;all[i]=a;all.sort((x,y)=>Date.parse(y.publishedAt)-Date.parse(x.publishedAt));await saveArticles(env,all);return Response.json({success:true,data:publicArticle(a)},{headers:HEADERS});}
-      if(path.startsWith('/api/admin/articles/') && request.method==='DELETE'){const id=decodeURIComponent(path.split('/').pop()||'');const all=await getArticles(env);const next=all.filter(x=>x.id!==id);if(next.length===all.length)return Response.json({success:false,message:'Article not found.'},{status:404,headers:HEADERS});await saveArticles(env,next);return Response.json({success:true,message:'Article deleted.'},{headers:HEADERS});}
+    try{
+      if(request.method==='OPTIONS') return new Response(null,{status:204,headers:HEADERS});
+      const url=new URL(request.url);
+      const path=url.pathname;
+
+      if(path==='/api/health'){
+        return Response.json({status:'ok',service:'GlobalNews Today Cloudflare Worker API',timestamp:new Date().toISOString()},{headers:HEADERS});
+      }
+
+      if(path==='/api/collector/status'){
+        const data=(await env.NEWS_KV.get('collector_status','json'))||{status:'STANDBY',totalArticles:0};
+        return Response.json({success:true,data},{headers:HEADERS});
+      }
+
+      if(path==='/api/admin/login' && request.method==='POST') return await adminLogin(request,env);
+
+      if(path.startsWith('/api/admin/')){
+        if(!(await adminTokenFromRequest(request,env))){
+          return Response.json({success:false,message:'Unauthorized admin session.'},{status:401,headers:HEADERS});
+        }
+
+        if(path==='/api/admin/articles' && request.method==='GET'){
+          const all=await getArticles(env);
+          const requested=Number(url.searchParams.get('limit')||500);
+          const limit=Number.isFinite(requested)?Math.min(Math.max(requested,1),1000):500;
+          return Response.json({success:true,data:all.slice(0,limit),total:all.length},{headers:HEADERS});
+        }
+
+        if(path==='/api/admin/articles' && request.method==='POST'){
+          const body=await readJsonBody(request);
+          if(body===null) return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+          if(!String(body?.title||'').trim()) return Response.json({success:false,message:'Headline is required.'},{status:400,headers:HEADERS});
+          const all=await getArticles(env);
+          let article=normalizeAdminArticle(body);
+          if(all.some(item=>item.slug===article.slug)) article.slug=`${article.slug}-${Date.now().toString(36)}`;
+          const merged=[article,...all].sort((a,b)=>Date.parse(b.publishedAt)-Date.parse(a.publishedAt)).slice(0,5000);
+          await saveArticles(env,merged);
+          return Response.json({success:true,data:article},{status:201,headers:HEADERS});
+        }
+
+        const articlePathMatch=path.match(/^\/api\/admin\/articles\/(.+)$/);
+        if(articlePathMatch){
+          const id=decodeURIComponent(articlePathMatch[1]);
+          const all=await getArticles(env);
+          const index=all.findIndex(item=>item.id===id);
+
+          if(request.method==='PUT'){
+            if(index<0) return Response.json({success:false,message:'Article not found.'},{status:404,headers:HEADERS});
+            const body=await readJsonBody(request);
+            if(body===null) return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+            let article=normalizeAdminArticle(body,all[index]);
+            if(all.some((item,i)=>i!==index && item.slug===article.slug)) article.slug=`${article.slug}-${Date.now().toString(36)}`;
+            all[index]=article;
+            all.sort((a,b)=>Date.parse(b.publishedAt)-Date.parse(a.publishedAt));
+            await saveArticles(env,all);
+            return Response.json({success:true,data:article},{headers:HEADERS});
+          }
+
+          if(request.method==='DELETE'){
+            if(index<0) return Response.json({success:false,message:'Article not found.'},{status:404,headers:HEADERS});
+            all.splice(index,1);
+            await saveArticles(env,all);
+            return Response.json({success:true,message:'Article deleted.'},{headers:HEADERS});
+          }
+        }
+
+        return Response.json({success:false,message:'Admin endpoint not found.'},{status:404,headers:HEADERS});
+      }
+
+      const articles=()=>getArticles(env);
+      if(path==='/api/news' || path==='/api/news/latest'){
+        const all=(await articles()).filter(a=>a.isPublished!==false);
+        const rawLimit=Number(url.searchParams.get('limit')||50);
+        const limit=Number.isFinite(rawLimit)?Math.min(Math.max(rawLimit,1),100):50;
+        const rawOffset=Number(url.searchParams.get('offset')||0);
+        const offset=Number.isFinite(rawOffset)?Math.max(rawOffset,0):0;
+        return Response.json({success:true,data:publicArticles(all.slice(offset,offset+limit)),total:all.length,offset,limit,hasMore:offset+limit<all.length},{headers:HEADERS});
+      }
+
+      if(path.startsWith('/api/news/category/')){
+        const c=decodeURIComponent(path.slice('/api/news/category/'.length)).toLowerCase();
+        const all=(await articles()).filter(a=>a.isPublished!==false);
+        return Response.json({success:true,data:publicArticles(all.filter(a=>a.category.toLowerCase()===c))},{headers:HEADERS});
+      }
+
+      if(path.startsWith('/api/news/country/')){
+        const c=decodeURIComponent(path.slice('/api/news/country/'.length)).toLowerCase();
+        const all=(await articles()).filter(a=>a.isPublished!==false);
+        return Response.json({success:true,data:publicArticles(all.filter(a=>a.country.toLowerCase()===c))},{headers:HEADERS});
+      }
+
+      if(path==='/api/news/search'){
+        const q=(url.searchParams.get('q')||'').toLowerCase().trim();
+        const all=(await articles()).filter(a=>a.isPublished!==false);
+        const data=q?all.filter(a=>`${a.title} ${a.summary} ${a.content} ${a.category} ${a.country} ${a.tags.join(' ')}`.toLowerCase().includes(q)):[];
+        return Response.json({success:true,data:publicArticles(data.slice(0,100)),count:data.length},{headers:HEADERS});
+      }
+
+      if(path.startsWith('/api/news/article/')){
+        const slug=decodeURIComponent(path.slice('/api/news/article/'.length));
+        const article=(await articles()).filter(a=>a.isPublished!==false).find(a=>a.slug===slug);
+        if(!article) return Response.json({success:false,message:'Article not found.'},{status:404,headers:HEADERS});
+        return Response.json({success:true,data:publicArticle(article)},{headers:HEADERS});
+      }
+
+      if(path==='/api/feed/collect' && request.method==='POST'){
+        if(!env.ADMIN_SECRET) return Response.json({success:false,message:'Collector secret is not configured.'},{status:503,headers:HEADERS});
+        const auth=request.headers.get('Authorization')||'';
+        if(auth!==`Bearer ${env.ADMIN_SECRET}`) return Response.json({success:false,message:'Unauthorized'},{status:401,headers:HEADERS});
+        const result=await collect(env);
+        return Response.json(result,{headers:HEADERS});
+      }
+
+      return Response.json({success:false,message:'Not Found'},{status:404,headers:HEADERS});
+    }catch(error){
+      console.error('Worker request error',error);
+      return Response.json({success:false,message:'Internal server error.'},{status:500,headers:HEADERS});
     }
-    const articles=()=>getArticles(env);
-    if(path==='/api/news' || path==='/api/news/latest') { const all=(await articles()).filter(a=>a.isPublished!==false); const limit=Math.min(Number(url.searchParams.get('limit')||50),100); const offset=Math.max(Number(url.searchParams.get('offset')||0),0); return Response.json({success:true,data:publicArticles(all.slice(offset,offset+limit)),total:all.length,offset,limit,hasMore:offset+limit<all.length},{headers:HEADERS}); }
-    if(path.startsWith('/api/news/category/')) { const c=decodeURIComponent(path.split('/').pop()||'').toLowerCase(); const all=(await articles()).filter(a=>a.isPublished!==false); return Response.json({success:true,data:publicArticles(all.filter(a=>a.category.toLowerCase()===c))},{headers:HEADERS}); }
-    if(path.startsWith('/api/news/country/')) { const c=decodeURIComponent(path.split('/').pop()||'').toLowerCase(); const all=(await articles()).filter(a=>a.isPublished!==false); return Response.json({success:true,data:publicArticles(all.filter(a=>a.country.toLowerCase()===c))},{headers:HEADERS}); }
-    if(path==='/api/news/search') { const q=(url.searchParams.get('q')||'').toLowerCase().trim(); const all=(await articles()).filter(a=>a.isPublished!==false); const data=q?all.filter(a=>`${a.title} ${a.summary} ${a.content} ${a.category} ${a.country} ${a.tags.join(' ')} ${a.source}`.toLowerCase().includes(q)):[]; return Response.json({success:true,data:publicArticles(data.slice(0,100)),count:data.length},{headers:HEADERS}); }
-    if(path.startsWith('/api/news/article/')) { const slug=decodeURIComponent(path.slice('/api/news/article/'.length)); const a=(await articles()).filter(x=>x.isPublished!==false).find(x=>x.slug===slug); if(!a)return Response.json({success:false,message:'Article not found'},{status:404,headers:HEADERS}); return Response.json({success:true,data:publicArticle(a)},{headers:HEADERS}); }
-    if(path==='/api/feed/collect' && request.method==='POST') { if(!env.ADMIN_SECRET) return Response.json({success:false,message:'Collector secret is not configured.'},{status:503,headers:HEADERS}); const auth=request.headers.get('Authorization')||''; if(auth!==`Bearer ${env.ADMIN_SECRET}`) return Response.json({success:false,message:'Unauthorized'},{status:401,headers:HEADERS}); const result=await collect(env); return Response.json(result,{headers:HEADERS}); }
-    return Response.json({error:'Not Found'},{status:404,headers:HEADERS});
   },
-  async scheduled(_event:ScheduledEvent,env:Env,ctx:ExecutionContext){ ctx.waitUntil(collect(env)); }
+
+  async scheduled(_event:ScheduledEvent,env:Env,ctx:ExecutionContext){
+    ctx.waitUntil(collect(env));
+  }
 };

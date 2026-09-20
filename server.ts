@@ -107,7 +107,8 @@ function detectCountry(title: string, content: string = ''): NewsCountry {
 // -------------------------------------------------------------
 // ADMIN AUTH + EDITORIAL CRUD
 // -------------------------------------------------------------
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Akib9990';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const ADMIN_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 const adminSessions = new Map<string, number>();
 
@@ -152,8 +153,10 @@ function normalizeAdminArticle(input: Partial<Article>, existing?: Article): Art
 }
 
 app.post('/api/admin/login', (req, res) => {
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return res.status(503).json({ success: false, message: 'Admin credentials are not configured.' });
+  const email = String(req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
-  if (password !== ADMIN_PASSWORD) {
+  if (email !== ADMIN_EMAIL.toLowerCase() || password !== ADMIN_PASSWORD) {
     return res.status(401).json({ success: false, message: 'Invalid admin credentials.' });
   }
   const token = crypto.randomBytes(32).toString('hex');
@@ -169,7 +172,8 @@ app.post('/api/admin/logout', requireAdmin, (req, res) => {
 
 app.get('/api/admin/articles', requireAdmin, (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 500, 1), 1000);
-  res.json({ success: true, data: storedArticles.slice(0, limit), total: storedArticles.length });
+  const visible = storedArticles.filter(a => a.isPublished !== false);
+  res.json({ success: true, data: publicArticles(visible.slice(0, limit)), total: visible.length });
 });
 
 app.post('/api/admin/articles', requireAdmin, (req, res) => {

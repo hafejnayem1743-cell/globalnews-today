@@ -223,36 +223,21 @@ export default function App() {
           a.category === 'World'
       );
 
-  // Groupings for homepage — one global seen set prevents the same story appearing in multiple sections.
+  // Groupings for homepage
   const leadArticle = activeArticles[0] || articles[0];
   const secondaryArticles = activeArticles.slice(1, 3);
-  const usedHomeIds = new Set<string>([leadArticle?.id, ...secondaryArticles.map(a => a.id)].filter(Boolean) as string[]);
-  const trendingArticles = activeArticles.filter((a) => !usedHomeIds.has(a.id) && (a.category === 'Trending' || a.isFeatured)).slice(0, 6);
+  const usedHomeIds = new Set([leadArticle?.id, ...secondaryArticles.map(a => a.id)].filter(Boolean) as string[]);
+  const trendingArticles = articles.filter((a) => !usedHomeIds.has(a.id) && (a.category === 'Trending' || a.isFeatured)).slice(0, 6);
   trendingArticles.forEach(a => usedHomeIds.add(a.id));
+  const uniqueSection = (items: Article[]) => items.filter(a => !usedHomeIds.has(a.id)).slice(0, 8);
 
-  // Latest stories are shown prominently and are never repeated in later sections.
-  const latestHomeArticles = activeArticles.filter(a => !usedHomeIds.has(a.id)).slice(0, 12);
-  latestHomeArticles.forEach(a => usedHomeIds.add(a.id));
-
-  const takeUnique = (items: Article[], limit = 8) => {
-    const result: Article[] = [];
-    for (const item of items) {
-      if (usedHomeIds.has(item.id)) continue;
-      usedHomeIds.add(item.id);
-      result.push(item);
-      if (result.length >= limit) break;
-    }
-    return result;
-  };
-
-  const worldNews = takeUnique(activeArticles.filter(a => a.category === 'World'));
-  const usNews = takeUnique(activeArticles.filter(a => a.category === 'US'));
-  const ukNews = takeUnique(activeArticles.filter(a => a.category === 'UK'));
-  const businessNews = takeUnique(activeArticles.filter(a => a.category === 'Business'));
-  const techNews = takeUnique(activeArticles.filter(a => a.category === 'Technology' || a.category === 'AI'));
-  const sportsNews = takeUnique(activeArticles.filter(a => a.category === 'Sports'));
-  const healthScienceNews = takeUnique(activeArticles.filter(a => a.category === 'Health' || a.category === 'Science'));
-  const remainingNews = takeUnique(activeArticles, 1000);
+  const worldNews = uniqueSection(articles.filter((a) => a.category === 'World'));
+  const usNews = uniqueSection(articles.filter((a) => a.category === 'US'));
+  const ukNews = uniqueSection(articles.filter((a) => a.category === 'UK'));
+  const businessNews = uniqueSection(articles.filter((a) => a.category === 'Business'));
+  const techNews = uniqueSection(articles.filter((a) => a.category === 'Technology' || a.category === 'AI'));
+  const sportsNews = uniqueSection(articles.filter((a) => a.category === 'Sports'));
+  const healthScienceNews = uniqueSection(articles.filter((a) => a.category === 'Health' || a.category === 'Science'));
 
   useEffect(() => {
     let cancelled = false;
@@ -362,18 +347,6 @@ export default function App() {
               />
             )}
 
-            {/* Latest News — every unique published story is available on the homepage */}
-            <CategorySection
-              title="Latest Global News"
-              category="Trending"
-              articles={latestHomeArticles}
-              layout="grid"
-              onArticleClick={handleNavigateArticle}
-              onCategoryClick={handleNavigateCategory}
-              bookmarkedIds={bookmarkedIds}
-              onBookmarkToggle={handleBookmarkToggle}
-            />
-
             {/* World Affairs Section */}
             <CategorySection
               title="World Dispatches & International Relations"
@@ -462,19 +435,6 @@ export default function App() {
               bookmarkedIds={bookmarkedIds}
               onBookmarkToggle={handleBookmarkToggle}
             />
-
-            {remainingNews.length > 0 && (
-              <CategorySection
-                title="More Global News"
-                category="Trending"
-                articles={remainingNews}
-                layout="grid"
-                onArticleClick={handleNavigateArticle}
-                onCategoryClick={handleNavigateCategory}
-                bookmarkedIds={bookmarkedIds}
-                onBookmarkToggle={handleBookmarkToggle}
-              />
-            )}
 
           </div>
         )}

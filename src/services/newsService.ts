@@ -104,7 +104,7 @@ class NewsService {
 
     // If external worker configured, attempt to fetch
     if (APP_CONFIG.apiBaseUrl) {
-      const remote = await this.fetchApi<{ success: boolean; data: Article[] }>('/api/news?limit=100');
+      const remote = await this.fetchApi<{ success: boolean; data: Article[] }>('/api/news');
       if (remote && remote.data && Array.isArray(remote.data)) {
         this.inMemoryArticles = remote.data;
         this.saveToStorage();

@@ -1,4 +1,4 @@
-# GlobalNews Today v1.6
+# GlobalNews Today v1.5
 
 Premium English international news website with a Bengali-only admin panel.
 
@@ -9,10 +9,6 @@ Premium English international news website with a Bengali-only admin panel.
 - Admin CRUD: create, edit, delete, publish/unpublish, featured, breaking, category, country, image, author, tags and publication time.
 - Public website remains English; admin interface is Bengali.
 - Collector Telemetry UI removed.
-- Admin login uses password-only authentication (no admin email field).
-- Admin API can manage published and unpublished articles.
-- Homepage uses a global deduplication pass so one story is not repeated across sections.
-- Latest stories are surfaced on the homepage and article pages render the full stored content with headline, image and text.
 - Public article metadata does not expose feed/source names or external source URLs.
 - Cloudflare Worker scheduled collector remains on a 30-minute cron.
 - Duplicate prevention by normalized title and source URL/fingerprint.
@@ -23,6 +19,7 @@ Premium English international news website with a Bengali-only admin panel.
 ## Cloudflare Worker setup
 Create a KV namespace and replace the placeholder namespace ID in `wrangler.toml`.
 Configure these Worker secrets/variables in Cloudflare:
+- `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
 - `ADMIN_SECRET`
 
@@ -45,4 +42,22 @@ npm install
 npm run build
 ```
 
-For local API mode, `ADMIN_PASSWORD` may be supplied as an environment secret. The packaged local fallback is the configured admin password, while Cloudflare production should use an `ADMIN_PASSWORD` secret and `ADMIN_SECRET`.
+For local API mode, configure `ADMIN_EMAIL` and `ADMIN_PASSWORD` in the environment before starting the Express server.
+
+## v1.7 Admin API Fix
+
+Admin authentication is handled by the Cloudflare Worker.
+
+Required Cloudflare secrets (never commit these values):
+- `ADMIN_PASSWORD`
+- `ADMIN_SECRET`
+
+Admin login uses `POST /api/admin/login` with `{ "password": "..." }` and returns a signed, expiring bearer token. Protected article CRUD endpoints require `Authorization: Bearer <token>`.
+
+Worker configuration uses:
+- Worker: `globalnews-news-collector`
+- KV binding: `NEWS_KV`
+- Cron: `*/30 * * * *`
+- KV namespace ID: `5cd9bc731aad4577ac3b58b5f9419ffc`
+
+Set secrets with Cloudflare Wrangler or the Cloudflare Dashboard Variables and Secrets UI. Never place real secret values in source control.

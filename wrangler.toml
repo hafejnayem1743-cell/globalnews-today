@@ -9,5 +9,4 @@ crons = ["*/30 * * * *"]
 binding = "NEWS_KV"
 id = "5cd9bc731aad4577ac3b58b5f9419ffc"
 
-[vars]
-# Set ADMIN_SECRET in Cloudflare dashboard/secret store, not in source control.
+# ADMIN_PASSWORD and ADMIN_SECRET must be configured as Cloudflare secrets.

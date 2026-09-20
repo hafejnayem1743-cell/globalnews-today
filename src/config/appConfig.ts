@@ -9,7 +9,7 @@ export const APP_CONFIG = {
   edition: 'International Edition',
   apiBaseUrl: (import.meta.env.VITE_NEWS_API_URL || '').replace(/\/$/, ''),
   useDemoData: import.meta.env.VITE_USE_DEMO_DATA === 'true',
-  version: '1.6.0',
+  version: '1.7.0',
 };
 
 export const CATEGORIES_CONFIG: Array<{
