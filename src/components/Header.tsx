@@ -9,6 +9,7 @@ import {
   Globe,
   Clock,
   ExternalLink,
+  Megaphone,
 } from 'lucide-react';
 import { NewsCategory, NewsCountry } from '../types/news';
 import { CATEGORIES_CONFIG, COUNTRIES_CONFIG, APP_CONFIG } from '../config/appConfig';
@@ -25,6 +26,7 @@ interface HeaderProps {
   bookmarkedCount: number;
   selectedEdition: string;
   onSelectEdition: (edition: string) => void;
+  onNavigateAdvertise: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -39,6 +41,7 @@ export const Header: React.FC<HeaderProps> = ({
   bookmarkedCount,
   selectedEdition,
   onSelectEdition,
+  onNavigateAdvertise,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [currentTime, setCurrentTime] = useState({ local: '', utc: '' });
@@ -114,8 +117,9 @@ export const Header: React.FC<HeaderProps> = ({
             ))}
           </div>
 
-          {/* Right: Telemetry Status, Bookmarks, and Theme Toggle */}
-          <div className="flex items-center gap-3">
+          {/* Right: Paid Advertisement, Bookmarks, and Theme Toggle */}
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button type="button" onClick={onNavigateAdvertise} className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 px-2.5 py-1.5 text-[11px] font-extrabold hover:bg-red-100 dark:hover:bg-red-950/50 transition"><Megaphone className="w-3.5 h-3.5"/> Paid Advertisement</button>
             <button
               type="button"
               onClick={onNavigateBookmarks}
@@ -272,6 +276,8 @@ export const Header: React.FC<HeaderProps> = ({
                   <span>Search all world news...</span>
                 </div>
               </button>
+
+              <button type="button" onClick={() => { onNavigateAdvertise(); setMobileMenuOpen(false); }} className="w-full mb-4 inline-flex items-center justify-center gap-2 rounded-xl bg-red-700 text-white px-4 py-3 text-sm font-black shadow-lg"><Megaphone className="w-4 h-4"/> Paid Advertisement</button>
 
               {/* Category Links */}
               <div className="space-y-1">

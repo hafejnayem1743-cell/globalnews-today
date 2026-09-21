@@ -14,6 +14,7 @@ import { Footer } from './components/Footer';
 import { StaticPage } from './components/StaticPage';
 import { AdminPanel } from './components/AdminPanel';
 import { Loader2 } from 'lucide-react';
+import { AdvertisePage, AdvertisementPaymentPage } from './components/AdvertisementPages';
 
 const SITE_URL = (import.meta.env.VITE_SITE_URL || window.location.origin).replace(/\/$/, '');
 
@@ -48,6 +49,8 @@ function applySiteSeo(pathname: string, article?: Article | null, category?: New
   setMeta('twitter:card', 'summary_large_image');
   setMeta('twitter:title', title);
   setMeta('twitter:description', description);
+  const robots = pathname.startsWith('/admin') || pathname.startsWith('/advertise/payment') ? 'noindex,nofollow' : 'index,follow';
+  setMeta('robots', robots);
   if (article?.image) {
     setMeta('og:image', article.image, 'property');
     setMeta('twitter:image', article.image);
@@ -66,6 +69,8 @@ export default function App() {
   const [staticPage, setStaticPage] = useState<'latest'|'about'|'editorial'|'corrections'|'privacy'|'terms'|'contact'|null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => window.location.pathname === '/admin' || window.location.pathname === '/admin/');
+  const [isAdvertiseRoute, setIsAdvertiseRoute] = useState<boolean>(() => window.location.pathname === '/advertise');
+  const [isPaymentRoute, setIsPaymentRoute] = useState<boolean>(() => window.location.pathname === '/advertise/payment');
 
   // Modals
   const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
@@ -141,8 +146,11 @@ export default function App() {
       const path = window.location.pathname.replace(/\/+$/, '') || '/';
       const hash = window.location.hash;
       const route = path !== '/' ? path : (hash.replace(/^#/, '') || '/');
-      if (route === '/admin' || route === '/admin/') { setIsAdminRoute(true); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); return; }
+      if (route === '/admin' || route === '/admin/') { setIsAdminRoute(true); setIsAdvertiseRoute(false); setIsPaymentRoute(false); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); return; }
       setIsAdminRoute(false);
+      if (route === '/advertise') { setIsAdvertiseRoute(true); setIsPaymentRoute(false); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); return; }
+      if (route === '/advertise/payment') { setIsAdvertiseRoute(false); setIsPaymentRoute(true); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); return; }
+      setIsAdvertiseRoute(false); setIsPaymentRoute(false);
       if (route.startsWith('/news/')) {
         setSelectedArticleSlug(decodeURIComponent(route.replace('/news/', ''))); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false);
       } else if (route.startsWith('/category/')) {
@@ -162,6 +170,7 @@ export default function App() {
 
   // Navigation handlers
   const handleNavigateHome = () => {
+    setIsAdvertiseRoute(false); setIsPaymentRoute(false);
     window.history.pushState({}, '', '/');
     setSelectedArticleSlug(null);
     setSelectedCategory(null);
@@ -171,6 +180,7 @@ export default function App() {
   };
 
   const handleNavigateArticle = (slug: string) => {
+    setIsAdvertiseRoute(false); setIsPaymentRoute(false);
     window.history.pushState({}, '', `/news/${encodeURIComponent(slug)}`);
     setSelectedArticleSlug(slug);
     setSelectedCategory(null);
@@ -179,6 +189,7 @@ export default function App() {
   };
 
   const handleNavigateCategory = (cat: NewsCategory | string) => {
+    setIsAdvertiseRoute(false); setIsPaymentRoute(false);
     window.history.pushState({}, '', `/category/${encodeURIComponent(String(cat).toLowerCase())}`);
     setSelectedCategory(cat as NewsCategory);
     setSelectedArticleSlug(null);
@@ -197,6 +208,7 @@ export default function App() {
   };
 
   const handleNavigateBookmarks = () => {
+    setIsAdvertiseRoute(false); setIsPaymentRoute(false);
     window.history.pushState({}, '', '/bookmarks');
     setIsBookmarksView(true);
     setSelectedArticleSlug(null);
@@ -207,6 +219,7 @@ export default function App() {
   const handleNavigateAdmin = () => { window.history.pushState({}, '', '/admin'); setIsAdminRoute(true); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); window.scrollTo({top:0}); };
 
   const handleNavigateStatic = (page: NonNullable<typeof staticPage>) => {
+    setIsAdvertiseRoute(false); setIsPaymentRoute(false);
     const path = page === 'latest' ? '/latest' : page === 'editorial' ? '/editorial-standards' : `/${page}`;
     window.history.pushState({}, '', path);
     setStaticPage(page); setSelectedArticleSlug(null); setSelectedCategory(null); setIsBookmarksView(false);
@@ -257,8 +270,11 @@ export default function App() {
   }, [selectedArticle, selectedCategory]);
 
   if (isAdminRoute) {
-    return <AdminPanel isDarkMode={isDarkMode} onToggleTheme={() => setIsDarkMode(v => !v)} onExit={() => { window.history.pushState({}, '', '/'); setIsAdminRoute(false); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); window.scrollTo({top:0}); }} />;
+    return <AdminPanel isDarkMode={isDarkMode} onToggleTheme={() => setIsDarkMode(v => !v)} onExit={() => { window.history.pushState({}, '', '/'); setIsAdminRoute(false); setIsAdvertiseRoute(false); setIsPaymentRoute(false); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); window.scrollTo({top:0}); }} />;
   }
+
+  if (isAdvertiseRoute) { return <AdvertisePage onBack={handleNavigateHome} />; }
+  if (isPaymentRoute) { return <AdvertisementPaymentPage onBack={handleNavigateHome} />; }
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-50 dark:bg-stone-950 text-stone-900 dark:text-stone-100 selection:bg-red-800 selection:text-white transition-colors">
@@ -275,6 +291,7 @@ export default function App() {
         bookmarkedCount={bookmarkedIds.length}
         selectedEdition={selectedEdition}
         onSelectEdition={setSelectedEdition}
+        onNavigateAdvertise={() => { window.history.pushState({}, '', '/advertise'); setIsAdvertiseRoute(true); setIsPaymentRoute(false); setSelectedArticleSlug(null); setSelectedCategory(null); setStaticPage(null); setIsBookmarksView(false); window.scrollTo({top:0}); }}
       />
 
       {/* 2. Live Breaking News Ticker */}

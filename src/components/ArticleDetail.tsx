@@ -241,6 +241,9 @@ export const ArticleDetail: React.FC<ArticleDetailProps> = ({
             • {article.readingTimeMinutes} min read
           </span>
         )}
+        {article.tags?.includes('Sponsored') && (
+          <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-2.5 py-1 text-[10px] font-black uppercase tracking-wider">Sponsored</span>
+        )}
       </div>
 
       {/* 3. Headline (H1) */}

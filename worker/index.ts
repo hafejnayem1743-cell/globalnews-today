@@ -3,10 +3,10 @@
  * Public RSS/API aggregation only. No anti-bot bypassing or scraping of protected pages.
  * KV bindings: NEWS_KV (required for production), ADMIN_SECRET (required for manual collection).
  */
-interface KVNamespace { get(key: string, type?: 'json'|'text'): Promise<any>; put(key: string, value: string, options?: any): Promise<void>; }
+interface KVNamespace { get(key: string, type?: 'json'|'text'): Promise<any>; put(key: string, value: string, options?: any): Promise<void>; delete?(key: string): Promise<void>; }
 interface ExecutionContext { waitUntil(promise: Promise<any>): void; }
 interface ScheduledEvent { cron: string; scheduledTime: number; }
-interface Env { NEWS_KV: KVNamespace; ADMIN_SECRET?: string; ADMIN_PASSWORD?: string; }
+interface Env { NEWS_KV: KVNamespace; ADMIN_SECRET?: string; ADMIN_PASSWORD?: string; TURNSTILE_SECRET?: string; }
 
 type Article = { id:string; title:string; slug:string; summary:string; content:string; image:string; source:string; sourceUrl:string; category:string; country:string; publishedAt:string; collectedAt:string; author?:string; tags:string[]; isBreaking?:boolean; isFeatured?:boolean; isPublished?:boolean; readingTimeMinutes?:number };
 type Feed = {id:string; name:string; url:string; category:string; country:string};
@@ -138,6 +138,102 @@ async function adminLogin(request:Request,env:Env):Promise<Response>{
   return Response.json({success:true,token,expiresIn},{headers:HEADERS});
 }
 
+
+
+type AdRequest = {
+  id:string; status:string; title:string; description:string; content:string; image:string; category:string; country:string;
+  author:string; email:string; phone:string; website:string; sourceUrl:string; tags:string[];
+  verificationId:string; verificationStatus:string; verificationTimestamp?:string; paymentNetwork?:string; walletAddress?:string; txid?:string;
+  paymentProofKey?:string; payer?:string; note?:string; createdAt:string; updatedAt:string; approvedAt?:string; publishedAt?:string; rejectionReason?:string;
+};
+const AD_VERIFY_TTL = 15 * 60 * 1000;
+const AD_REQUEST_TTL = 7 * 24 * 60 * 60 * 1000;
+const MAX_MAIN_IMAGE = 2 * 1024 * 1024;
+const MAX_PROOF_IMAGE = 3 * 1024 * 1024;
+const VERIFY_SMARTLINK = 'https://www.profitableratecpmnetwork.com/z70a7x8f?key=aacfc748e10d2795a81fc25f7aabc685';
+const PAYMENT_SMARTLINK = 'https://www.profitableratecpmnetwork.com/d5f8n6fvm8?key=d80dba17f3d1abd7637214f3d54c01ac';
+const WORKER_PUBLIC_URL = 'https://globalnews-news-collector.hafejnayem1743.workers.dev';
+const BEP20_ADDRESS = '0xa6c1c397df155614cfe1b16d7b1efefe681fa5c2';
+const TRC20_ADDRESS = 'TH9rhUmnZoCfv7wFB7aG8xt9J7rZrrT9EK';
+
+function adKey(id:string){return `ad_request:${id}`;}
+function adAssetKey(id:string,kind:'main'|'proof'){return `ad_asset:${id}:${kind}`;}
+async function getAdRequest(env:Env,id:string):Promise<AdRequest|null>{return await env.NEWS_KV.get(adKey(id),'json');}
+async function saveAdRequest(env:Env,item:AdRequest){await env.NEWS_KV.put(adKey(item.id),JSON.stringify(item));}
+async function getAdIndex(env:Env):Promise<string[]>{return (await env.NEWS_KV.get('ad_requests:index','json'))||[];}
+async function saveAdIndex(env:Env,ids:string[]){await env.NEWS_KV.put('ad_requests:index',JSON.stringify(ids.slice(0,5000)));}
+function clientIp(request:Request){return request.headers.get('CF-Connecting-IP')||request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim()||'unknown';}
+async function rateLimit(env:Env,key:string,limit:number,windowMs:number):Promise<boolean>{
+  const now=Date.now(); const k=`ad_rate:${key}`; const data=await env.NEWS_KV.get(k,'json')||{count:0,expiresAt:0};
+  if(data.expiresAt<=now){await env.NEWS_KV.put(k,JSON.stringify({count:1,expiresAt:now+windowMs}),{expirationTtl:Math.ceil(windowMs/1000)});return true;}
+  if(Number(data.count)>=limit)return false; data.count+=1; await env.NEWS_KV.put(k,JSON.stringify(data),{expirationTtl:Math.ceil((data.expiresAt-now)/1000)}); return true;
+}
+function validImageData(value:any,maxBytes:number,allowed=['image/jpeg','image/png','image/webp','image/gif']):boolean{
+  if(typeof value!=='string')return false; const m=value.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/); if(!m||!allowed.includes(m[1]))return false;
+  const bytes=Math.floor(m[2].length*3/4); return bytes>0&&bytes<=maxBytes;
+}
+function cleanText(value:any,max:number){return String(value??'').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'').trim().slice(0,max);}
+function validUrl(value:string){if(!value)return '';try{const u=new URL(value);return /^https?:$/.test(u.protocol)?u.toString():''}catch{return ''}}
+async function verifyTurnstile(token:string|undefined,request:Request,env:Env):Promise<boolean>{
+  if(!env.TURNSTILE_SECRET)return true; if(!token)return false;
+  try{const form=new FormData();form.append('secret',env.TURNSTILE_SECRET);form.append('response',token);form.append('remoteip',clientIp(request));const r=await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify',{method:'POST',body:form});const data=await r.json() as any;return Boolean(data?.success);}catch{return false;}
+}
+async function startAdVerification(request:Request,env:Env){
+  if(!(await rateLimit(env,`verify:${clientIp(request)}`,5,10*60*1000)))return Response.json({success:false,message:'Too many verification attempts. Please try again later.'},{status:429,headers:HEADERS});
+  const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+  if(String(body?.honeypot||'').trim())return Response.json({success:false,message:'Verification could not be started.'},{status:400,headers:HEADERS});
+  if(!(await verifyTurnstile(body?.turnstileToken,request,env)))return Response.json({success:false,message:'Bot verification failed. Please try again.'},{status:403,headers:HEADERS});
+  const id=crypto.randomUUID(); const now=Date.now();
+  await env.NEWS_KV.put(`ad_verify:${id}`,JSON.stringify({id,status:'pending',createdAt:new Date(now).toISOString(),expiresAt:now+AD_VERIFY_TTL,ip:clientIp(request)}),{expirationTtl:Math.ceil(AD_VERIFY_TTL/1000)});
+  return Response.json({success:true,verificationId:id,expiresIn:AD_VERIFY_TTL,externalStep:VERIFY_SMARTLINK},{headers:HEADERS});
+}
+async function confirmAdVerification(request:Request,env:Env){
+  const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+  const id=cleanText(body?.verificationId,80); if(!id)return Response.json({success:false,message:'Verification session is required.'},{status:400,headers:HEADERS});
+  const record=await env.NEWS_KV.get(`ad_verify:${id}`,'json'); if(!record||record.expiresAt<=Date.now()||record.status==='used')return Response.json({success:false,message:'Verification session expired. Please verify again.'},{status:410,headers:HEADERS});
+  record.status='verified'; record.verifiedAt=new Date().toISOString(); await env.NEWS_KV.put(`ad_verify:${id}`,JSON.stringify(record),{expirationTtl:Math.ceil((record.expiresAt-Date.now())/1000)});
+  return Response.json({success:true,verified:true,verificationId:id,verifiedAt:record.verifiedAt},{headers:HEADERS});
+}
+async function createAdRequest(request:Request,env:Env){
+  if(!(await rateLimit(env,`request:${clientIp(request)}`,3,60*60*1000)))return Response.json({success:false,message:'Too many advertisement requests from this connection. Please try again later.'},{status:429,headers:HEADERS});
+  const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+  const verificationId=cleanText(body?.verificationId,80); const verification=verificationId?await env.NEWS_KV.get(`ad_verify:${verificationId}`,'json'):null;
+  if(!verification||verification.status!=='verified'||verification.expiresAt<=Date.now())return Response.json({success:false,message:'A valid verification session is required.'},{status:403,headers:HEADERS});
+  const title=cleanText(body?.title,180), description=cleanText(body?.description,500), content=cleanText(body?.content,30000), email=cleanText(body?.email,160);
+  if(!title||!description||!content||!email||!validImageData(body?.image,MAX_MAIN_IMAGE))return Response.json({success:false,message:'Title, description, content, email and a valid main image are required.'},{status:400,headers:HEADERS});
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return Response.json({success:false,message:'Please provide a valid contact email.'},{status:400,headers:HEADERS});
+  const id=crypto.randomUUID(), now=new Date().toISOString();
+  await env.NEWS_KV.put(adAssetKey(id,'main'),String(body.image));
+  const item:AdRequest={id,status:'payment_pending',title,description,content,image:`/api/ads/assets/${id}/main`,category:cleanText(body?.category,60)||'World',country:cleanText(body?.country,80)||'International',author:cleanText(body?.author,100),email,phone:cleanText(body?.phone,120),website:validUrl(cleanText(body?.website,500)),sourceUrl:validUrl(cleanText(body?.sourceUrl,500)),tags:Array.isArray(body?.tags)?body.tags.map((x:any)=>cleanText(x,40)).filter(Boolean).slice(0,20):[],verificationId,verificationStatus:'verified',verificationTimestamp:verification.verifiedAt||new Date().toISOString(),createdAt:now,updatedAt:now};
+  await saveAdRequest(env,item); const ids=await getAdIndex(env); await saveAdIndex(env,[id,...ids.filter(x=>x!==id)]); verification.status='consumed'; await env.NEWS_KV.put(`ad_verify:${verificationId}`,JSON.stringify(verification),{expirationTtl:Math.max(1,Math.ceil((verification.expiresAt-Date.now())/1000))});
+  return Response.json({success:true,requestId:id,status:item.status},{status:201,headers:HEADERS});
+}
+async function finalizeAdRequest(request:Request,env:Env,id:string){
+  const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
+  const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+  if(body.verificationId!==item.verificationId)return Response.json({success:false,message:'Invalid request session.'},{status:403,headers:HEADERS});
+  if(item.status!=='payment_submitted')return Response.json({success:false,message:'Payment submission is not ready for review.'},{status:409,headers:HEADERS});
+  item.status='pending_admin_review'; item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item);
+  return Response.json({success:true,requestId:id,status:item.status},{headers:HEADERS});
+}
+async function submitAdPayment(request:Request,env:Env,id:string){
+  const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
+  if(!['payment_pending','payment_submitted'].includes(item.status))return Response.json({success:false,message:'This request is not accepting payment evidence.'},{status:409,headers:HEADERS});
+  const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+  if(body.verificationId!==item.verificationId)return Response.json({success:false,message:'Invalid request session.'},{status:403,headers:HEADERS});
+  const network=body?.network==='TRC20'?'TRC20':body?.network==='BEP20'?'BEP20':''; const walletAddress=network==='TRC20'?TRC20_ADDRESS:network==='BEP20'?BEP20_ADDRESS:''; const txid=cleanText(body?.txid,180);
+  if(!network||!txid||!validImageData(body?.proof,MAX_PROOF_IMAGE,['image/jpeg','image/png','image/webp']))return Response.json({success:false,message:'Network, TXID and valid payment proof are required.'},{status:400,headers:HEADERS});
+  if(!/^[A-Za-z0-9:_-]{8,180}$/.test(txid))return Response.json({success:false,message:'Invalid transaction ID format.'},{status:400,headers:HEADERS});
+  await env.NEWS_KV.put(adAssetKey(id,'proof'),String(body.proof)); item.paymentNetwork=network; item.walletAddress=walletAddress; item.txid=txid; item.payer=cleanText(body?.payer,100); item.note=cleanText(body?.note,1000); item.paymentProofKey=adAssetKey(id,'proof'); item.status='payment_submitted'; item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item);
+  return Response.json({success:true,requestId:id,status:item.status,externalStep:PAYMENT_SMARTLINK},{headers:HEADERS});
+}
+function publicAdRequest(item:AdRequest){const {email,phone,website,sourceUrl,verificationId,verificationTimestamp,paymentProofKey,payer,note,txid,paymentNetwork,walletAddress,...safe}=item;return safe;}
+function adminAdRequest(item:AdRequest,proof?:string){return {...item,paymentProof:proof||undefined};}
+function normalizePublishedAd(body:any,existing?:Article):Article{
+  const now=new Date().toISOString(); const title=cleanText(body?.title||existing?.title,180); const content=cleanText(body?.content||existing?.content,30000); const slug=slugify(title)||`sponsored-${Date.now().toString(36)}`;
+  return {id:existing?.id||crypto.randomUUID(),title,slug,summary:cleanText(body?.description||existing?.summary||content.slice(0,300),500),content,image:String(body?.image||existing?.image||FALLBACK),source:'GlobalNews Today',sourceUrl:'',category:cleanText(body?.category||existing?.category||'World',60),country:cleanText(body?.country||existing?.country||'International',80),publishedAt:existing?.publishedAt||now,collectedAt:existing?.collectedAt||now,author:cleanText(body?.author||existing?.author||'GlobalNews Today',100),tags:Array.isArray(body?.tags)?body.tags.map((x:any)=>cleanText(x,40)).filter(Boolean).slice(0,20):existing?.tags||['Sponsored'],isBreaking:Boolean(body?.isBreaking??existing?.isBreaking),isFeatured:Boolean(body?.isFeatured??existing?.isFeatured),isPublished:true,readingTimeMinutes:Math.max(1,Math.ceil(content.split(/\s+/).length/200))};
+}
+
 function publicArticle(a:Article){const {source:_source,sourceUrl:_sourceUrl,...publicFields}=a;return {...publicFields,source:'',sourceUrl:'',author:'GlobalNews Today'};}
 function publicArticles(list:Article[]){return list.map(publicArticle);}
 
@@ -146,7 +242,7 @@ function normalizeAdminArticle(input:any,existing?:Article):Article{const now=ne
 async function collect(env:Env) {
   const existing=await getArticles(env); const urls=new Set(existing.map(a=>a.sourceUrl?.trim().toLowerCase())); const titles=new Set(existing.map(a=>norm(a.title))); let fetched=0,newCount=0,dupes=0; const failed:string[]=[]; const additions:Article[]=[];
   for(const feed of FEEDS){
-    try { const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),8000); const r=await fetch(feed.url,{signal:ctl.signal,headers:{'User-Agent':'GlobalNewsToday/1.8 RSS collector; contact newsroom via site'}}); clearTimeout(timer); if(!r.ok) throw new Error(`HTTP ${r.status}`); const xml=await r.text(); const parsed=parseFeed(xml,feed); fetched+=parsed.length;
+    try { const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),8000); const r=await fetch(feed.url,{signal:ctl.signal,headers:{'User-Agent':'GlobalNewsToday/2.0 RSS collector; contact newsroom via site'}}); clearTimeout(timer); if(!r.ok) throw new Error(`HTTP ${r.status}`); const xml=await r.text(); const parsed=parseFeed(xml,feed); fetched+=parsed.length;
       for(const a of parsed){const u=a.sourceUrl.toLowerCase().trim(),t=norm(a.title); if(urls.has(u)||titles.has(t)){dupes++;continue;} urls.add(u);titles.add(t);additions.push(a);newCount++;}
     } catch { failed.push(feed.name); }
   }
@@ -172,6 +268,31 @@ export default {
         return Response.json({success:true,data},{headers:HEADERS});
       }
 
+      if(path==='/api/ads/verification/start'){
+        if(request.method!=='POST') return Response.json({success:false,message:'Method not allowed.'},{status:405,headers:{...HEADERS,'Allow':'POST, OPTIONS'}});
+        return await startAdVerification(request,env);
+      }
+      if(path==='/api/ads/verification/confirm'){
+        if(request.method!=='POST') return Response.json({success:false,message:'Method not allowed.'},{status:405,headers:{...HEADERS,'Allow':'POST, OPTIONS'}});
+        return await confirmAdVerification(request,env);
+      }
+      if(path==='/api/ads/requests'){
+        if(request.method!=='POST') return Response.json({success:false,message:'Method not allowed.'},{status:405,headers:{...HEADERS,'Allow':'POST, OPTIONS'}});
+        return await createAdRequest(request,env);
+      }
+      const adPaymentMatch=path.match(/^\/api\/ads\/requests\/([^/]+)\/payment$/);
+      if(adPaymentMatch && request.method==='POST') return await submitAdPayment(request,env,decodeURIComponent(adPaymentMatch[1]));
+      const adFinalizeMatch=path.match(/^\/api\/ads\/requests\/([^/]+)\/finalize$/);
+      if(adFinalizeMatch && request.method==='POST') return await finalizeAdRequest(request,env,decodeURIComponent(adFinalizeMatch[1]));
+      const assetMatch=path.match(/^\/api\/ads\/assets\/([^/]+)\/(main)$/);
+      if(assetMatch && request.method==='GET'){
+        const raw=await env.NEWS_KV.get(adAssetKey(decodeURIComponent(assetMatch[1]),'main'),'text');
+        if(!raw||!raw.startsWith('data:image/')) return Response.json({success:false,message:'Asset not found.'},{status:404,headers:HEADERS});
+        const m=raw.match(/^data:(image\/[^;]+);base64,(.+)$/); if(!m)return Response.json({success:false,message:'Asset unavailable.'},{status:404,headers:HEADERS});
+        const bin=atob(m[2]); const bytes=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+        return new Response(bytes,{headers:{'Content-Type':m[1],'Cache-Control':'public, max-age=86400','X-Content-Type-Options':'nosniff'}});
+      }
+
       if(path==='/api/admin/login'){
         if(request.method!=='POST') return Response.json({success:false,message:'Method not allowed.'},{status:405,headers:{...HEADERS,'Allow':'POST, OPTIONS'}});
         return await adminLogin(request,env);
@@ -180,6 +301,33 @@ export default {
       if(path.startsWith('/api/admin/')){
         if(!(await adminTokenFromRequest(request,env))){
           return Response.json({success:false,message:'Unauthorized admin session.'},{status:401,headers:HEADERS});
+        }
+
+        if(path==='/api/admin/advertisements' && request.method==='GET'){
+          const status=url.searchParams.get('status')||''; const ids=await getAdIndex(env); const list:AdRequest[]=[]; for(const id of ids){const item=await getAdRequest(env,id); if(item && (!status||item.status===status)) list.push(item);} return Response.json({success:true,data:list.map(item=>adminAdRequest(item)),total:list.length},{headers:HEADERS});
+        }
+        const adPathMatch=path.match(/^\/api\/admin\/advertisements\/([^/]+)$/);
+        if(adPathMatch){
+          const id=decodeURIComponent(adPathMatch[1]); const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
+          if(request.method==='GET'){const proof=item.paymentProofKey?await env.NEWS_KV.get(item.paymentProofKey,'text'):undefined;return Response.json({success:true,data:adminAdRequest(item,proof)},{headers:HEADERS});}
+          if(request.method==='PUT'){
+            const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+            const editable=['title','description','content','category','country','author','email','phone','website','sourceUrl','rejectionReason']; for(const key of editable) if(body[key]!==undefined) (item as any)[key]=key==='website'||key==='sourceUrl'?validUrl(cleanText(body[key],500)):cleanText(body[key],key==='content'?30000:500);
+            if(Array.isArray(body.tags))item.tags=body.tags.map((x:any)=>cleanText(x,40)).filter(Boolean).slice(0,20);
+            item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item); return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
+          }
+          if(request.method==='DELETE'){await env.NEWS_KV.delete?.(adKey(id)); await env.NEWS_KV.delete?.(adAssetKey(id,'main')); await env.NEWS_KV.delete?.(adAssetKey(id,'proof')); const ids=(await getAdIndex(env)).filter(x=>x!==id); await saveAdIndex(env,ids); return Response.json({success:true,message:'Advertisement request deleted.'},{headers:HEADERS});}
+        }
+        const adActionMatch=path.match(/^\/api\/admin\/advertisements\/([^/]+)\/(approve|reject|unpublish)$/);
+        if(adActionMatch && request.method==='POST'){
+          const id=decodeURIComponent(adActionMatch[1]); const action=adActionMatch[2]; const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
+          const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
+          if(action==='reject'){item.status='rejected';item.rejectionReason=cleanText(body?.reason,1000);item.updatedAt=new Date().toISOString();await saveAdRequest(env,item);return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});}
+          const all=await getArticles(env); const published=normalizePublishedAd({title:item.title,description:item.description,content:item.content,image:`${WORKER_PUBLIC_URL}${item.image}`,category:item.category,country:item.country,author:item.author,tags:[...item.tags,'Sponsored','Advertisement']});
+          if(action==='unpublish'){
+            const idx=all.findIndex(a=>a.id===item.id); if(idx>=0){all[idx].isPublished=false;await saveArticles(env,all);} item.status='approved';item.updatedAt=new Date().toISOString();await saveAdRequest(env,item);return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
+          }
+          const uniqueSlug=all.some(a=>a.slug===published.slug)?`${published.slug}-${item.id.slice(0,8)}`:published.slug; published.slug=uniqueSlug; published.id=item.id; all.unshift(published); await saveArticles(env,all); item.status='published';item.approvedAt=new Date().toISOString();item.publishedAt=published.publishedAt;item.updatedAt=new Date().toISOString();await saveAdRequest(env,item); return Response.json({success:true,data:publicAdRequest(item),article:published},{headers:HEADERS});
         }
 
         if(path==='/api/admin/articles' && request.method==='GET'){

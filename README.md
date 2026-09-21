@@ -1,4 +1,4 @@
-# GlobalNews Today v1.8
+# GlobalNews Today v2.0
 
 Premium English international news website with a Bengali-only admin panel.
 
@@ -62,7 +62,7 @@ Worker configuration uses:
 
 Set secrets with Cloudflare Wrangler or the Cloudflare Dashboard Variables and Secrets UI. Never place real secret values in source control.
 
-## v1.8 deployment notes
+## v2.0 deployment notes
 
 - The production frontend defaults to `https://globalnews-news-collector.hafejnayem1743.workers.dev` for API requests when `VITE_NEWS_API_URL` is not provided.
 - `ADMIN_PASSWORD` and `ADMIN_SECRET` are read only from the Cloudflare Worker environment.
@@ -70,3 +70,15 @@ Set secrets with Cloudflare Wrangler or the Cloudflare Dashboard Variables and S
 - Admin bearer tokens are HMAC-SHA-256 signed and expire after 12 hours.
 - The Worker keeps the existing RSS feeds, KV namespace, public APIs, manual collector authentication, and 30-minute scheduled collector.
 - `bun.lock` is intentionally absent; use npm/package-lock for the Pages build.
+
+
+## v2.0 Paid Advertisement System
+
+- Public `/advertise` submission flow with preview and server-side validation.
+- Server-side verification sessions; the supplied advertising Smartlink is treated only as an external advertising step, not as proof of human verification or payment.
+- Optional Cloudflare Turnstile support via `TURNSTILE_SECRET` and `VITE_TURNSTILE_SITE_KEY`.
+- Payment request flow for USDT BEP20/TRC20 with payment proof kept private to admins.
+- Advertisement requests are stored in the existing `NEWS_KV` namespace.
+- Admin advertisement review, edit, approve/publish, reject, unpublish and cancel controls.
+- Approved paid posts are labelled `Sponsored` and use the normal GlobalNews Today article layout.
+- No payment is auto-approved from a Smartlink visit, countdown, screenshot upload or client-side flag.
