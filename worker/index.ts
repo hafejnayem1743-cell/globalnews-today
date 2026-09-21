@@ -144,7 +144,7 @@ type AdRequest = {
   id:string; status:string; title:string; description:string; content:string; image:string; category:string; country:string;
   author:string; email:string; phone:string; website:string; sourceUrl:string; tags:string[];
   verificationId:string; verificationStatus:string; verificationTimestamp?:string; paymentNetwork?:string; walletAddress?:string; txid?:string;
-  paymentProofKey?:string; payer?:string; note?:string; createdAt:string; updatedAt:string; approvedAt?:string; publishedAt?:string; rejectionReason?:string;
+  paymentProofKey?:string; payer?:string; note?:string; createdAt:string; updatedAt:string; approvedAt?:string; publishedAt?:string; rejectedAt?:string; paymentSubmittedAt?:string; rejectionReason?:string;
 };
 const AD_VERIFY_TTL = 15 * 60 * 1000;
 const AD_REQUEST_TTL = 7 * 24 * 60 * 60 * 1000;
@@ -163,14 +163,42 @@ async function saveAdRequest(env:Env,item:AdRequest){await env.NEWS_KV.put(adKey
 async function getAdIndex(env:Env):Promise<string[]>{return (await env.NEWS_KV.get('ad_requests:index','json'))||[];}
 async function saveAdIndex(env:Env,ids:string[]){await env.NEWS_KV.put('ad_requests:index',JSON.stringify(ids.slice(0,5000)));}
 function clientIp(request:Request){return request.headers.get('CF-Connecting-IP')||request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim()||'unknown';}
-async function rateLimit(env:Env,key:string,limit:number,windowMs:number):Promise<boolean>{
-  const now=Date.now(); const k=`ad_rate:${key}`; const data=await env.NEWS_KV.get(k,'json')||{count:0,expiresAt:0};
-  if(data.expiresAt<=now){await env.NEWS_KV.put(k,JSON.stringify({count:1,expiresAt:now+windowMs}),{expirationTtl:Math.ceil(windowMs/1000)});return true;}
-  if(Number(data.count)>=limit)return false; data.count+=1; await env.NEWS_KV.put(k,JSON.stringify(data),{expirationTtl:Math.ceil((data.expiresAt-now)/1000)}); return true;
+async function rateLimit(env:Env,scope:string,identity:string,limit:number,windowMs:number):Promise<boolean>{
+  const now=Date.now();
+  const safeScope=scope.replace(/[^a-z0-9:_-]/gi,'_').slice(0,60);
+  const safeIdentity=identity.replace(/[^a-z0-9:_-]/gi,'_').slice(0,180);
+  const k=`ad_rate:${safeScope}:${safeIdentity}`;
+  const existing=await env.NEWS_KV.get(k,'json');
+  const current=existing && Number(existing.expiresAt)>now ? {count:Number(existing.count)||0,expiresAt:Number(existing.expiresAt)} : null;
+  if(!current){
+    const expiresAt=now+Math.max(1000,windowMs);
+    await env.NEWS_KV.put(k,JSON.stringify({count:1,expiresAt}),{expirationTtl:Math.max(1,Math.ceil((expiresAt-now)/1000))});
+    return true;
+  }
+  if(current.count>=limit)return false;
+  current.count+=1;
+  const ttl=Math.max(1,Math.ceil((current.expiresAt-now)/1000));
+  await env.NEWS_KV.put(k,JSON.stringify(current),{expirationTtl:ttl});
+  return true;
+}
+async function adminActionAllowed(env:Env,request:Request,action:string):Promise<boolean>{
+  return rateLimit(env,'admin-sensitive-action',`${action}:${clientIp(request)}`,40,60*60*1000);
 }
 function validImageData(value:any,maxBytes:number,allowed=['image/jpeg','image/png','image/webp','image/gif']):boolean{
-  if(typeof value!=='string')return false; const m=value.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/); if(!m||!allowed.includes(m[1]))return false;
-  const bytes=Math.floor(m[2].length*3/4); return bytes>0&&bytes<=maxBytes;
+  if(typeof value!=='string'||value.length>Math.ceil(maxBytes*1.38)+1000)return false;
+  const m=value.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/); if(!m||!allowed.includes(m[1]))return false;
+  if(m[2].length%4===1)return false;
+  const bytes=Math.floor(m[2].length*3/4)-(m[2].endsWith('==')?2:m[2].endsWith('=')?1:0);
+  if(bytes<=0||bytes>maxBytes)return false;
+  try{const bin=atob(m[2]); if(!bin.length)return false; const b=Uint8Array.from(bin.slice(0,16),c=>c.charCodeAt(0));
+    const signatures:Record<string,number[][]>={
+      'image/jpeg':[[0xff,0xd8,0xff]],
+      'image/png':[[0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]],
+      'image/webp':[[0x52,0x49,0x46,0x46]],
+      'image/gif':[[0x47,0x49,0x46,0x38]]
+    };
+    return (signatures[m[1]]||[]).some(sig=>sig.every((v,i)=>b[i]===v));
+  }catch{return false;}
 }
 function cleanText(value:any,max:number){return String(value??'').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'').trim().slice(0,max);}
 function validUrl(value:string){if(!value)return '';try{const u=new URL(value);return /^https?:$/.test(u.protocol)?u.toString():''}catch{return ''}}
@@ -179,7 +207,7 @@ async function verifyTurnstile(token:string|undefined,request:Request,env:Env):P
   try{const form=new FormData();form.append('secret',env.TURNSTILE_SECRET);form.append('response',token);form.append('remoteip',clientIp(request));const r=await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify',{method:'POST',body:form});const data=await r.json() as any;return Boolean(data?.success);}catch{return false;}
 }
 async function startAdVerification(request:Request,env:Env){
-  if(!(await rateLimit(env,`verify:${clientIp(request)}`,5,10*60*1000)))return Response.json({success:false,message:'Too many verification attempts. Please try again later.'},{status:429,headers:HEADERS});
+  if(!(await rateLimit(env,'verification-start',clientIp(request),5,10*60*1000)))return Response.json({success:false,message:'Too many verification attempts. Please try again later.'},{status:429,headers:HEADERS});
   const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
   if(String(body?.honeypot||'').trim())return Response.json({success:false,message:'Verification could not be started.'},{status:400,headers:HEADERS});
   if(!(await verifyTurnstile(body?.turnstileToken,request,env)))return Response.json({success:false,message:'Bot verification failed. Please try again.'},{status:403,headers:HEADERS});
@@ -188,6 +216,7 @@ async function startAdVerification(request:Request,env:Env){
   return Response.json({success:true,verificationId:id,expiresIn:AD_VERIFY_TTL,externalStep:VERIFY_SMARTLINK},{headers:HEADERS});
 }
 async function confirmAdVerification(request:Request,env:Env){
+  if(!(await rateLimit(env,'verification-confirm',clientIp(request),12,10*60*1000)))return Response.json({success:false,message:'Too many verification confirmation attempts. Please try again later.'},{status:429,headers:HEADERS});
   const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
   const id=cleanText(body?.verificationId,80); if(!id)return Response.json({success:false,message:'Verification session is required.'},{status:400,headers:HEADERS});
   const record=await env.NEWS_KV.get(`ad_verify:${id}`,'json'); if(!record||record.expiresAt<=Date.now()||record.status==='used')return Response.json({success:false,message:'Verification session expired. Please verify again.'},{status:410,headers:HEADERS});
@@ -195,36 +224,50 @@ async function confirmAdVerification(request:Request,env:Env){
   return Response.json({success:true,verified:true,verificationId:id,verifiedAt:record.verifiedAt},{headers:HEADERS});
 }
 async function createAdRequest(request:Request,env:Env){
-  if(!(await rateLimit(env,`request:${clientIp(request)}`,3,60*60*1000)))return Response.json({success:false,message:'Too many advertisement requests from this connection. Please try again later.'},{status:429,headers:HEADERS});
   const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
-  const verificationId=cleanText(body?.verificationId,80); const verification=verificationId?await env.NEWS_KV.get(`ad_verify:${verificationId}`,'json'):null;
-  if(!verification||verification.status!=='verified'||verification.expiresAt<=Date.now())return Response.json({success:false,message:'A valid verification session is required.'},{status:403,headers:HEADERS});
+  if(String(body?.honeypot||'').trim())return Response.json({success:false,message:'Advertisement request could not be submitted.'},{status:400,headers:HEADERS});
+  const verificationId=cleanText(body?.verificationId,80);
+  const verification=verificationId?await env.NEWS_KV.get(`ad_verify:${verificationId}`,'json'):null;
+  if(!verification||Number(verification.expiresAt)<=Date.now())return Response.json({success:false,message:'Your verified session is missing or expired. Please verify again.'},{status:403,headers:HEADERS});
+  const existingId=verification.requestId;
+  if(existingId){
+    const existing=await getAdRequest(env,existingId);
+    if(existing)return Response.json({success:true,requestId:existing.id,status:existing.status,duplicate:true,message:'Your advertisement request already exists. Continuing with the existing request.'},{status:200,headers:HEADERS});
+  }
+  if(verification.status!=='verified')return Response.json({success:false,message:'This verification session has already been consumed or is not ready for a new advertisement request.'},{status:409,headers:HEADERS});
+  if(!(await rateLimit(env,'advertisement-create',verificationId,1,60*60*1000)))return Response.json({success:false,message:'This verified advertisement session has already created a request. Please continue with that request instead of submitting again.'},{status:409,headers:HEADERS});
   const title=cleanText(body?.title,180), description=cleanText(body?.description,500), content=cleanText(body?.content,30000), email=cleanText(body?.email,160);
   if(!title||!description||!content||!email||!validImageData(body?.image,MAX_MAIN_IMAGE))return Response.json({success:false,message:'Title, description, content, email and a valid main image are required.'},{status:400,headers:HEADERS});
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return Response.json({success:false,message:'Please provide a valid contact email.'},{status:400,headers:HEADERS});
+  if(!(await rateLimit(env,'advertisement-create-ip',clientIp(request),3,60*60*1000)))return Response.json({success:false,message:'Too many new advertisement submissions from this connection. Please try again later.'},{status:429,headers:HEADERS});
   const id=crypto.randomUUID(), now=new Date().toISOString();
   await env.NEWS_KV.put(adAssetKey(id,'main'),String(body.image));
   const item:AdRequest={id,status:'payment_pending',title,description,content,image:`/api/ads/assets/${id}/main`,category:cleanText(body?.category,60)||'World',country:cleanText(body?.country,80)||'International',author:cleanText(body?.author,100),email,phone:cleanText(body?.phone,120),website:validUrl(cleanText(body?.website,500)),sourceUrl:validUrl(cleanText(body?.sourceUrl,500)),tags:Array.isArray(body?.tags)?body.tags.map((x:any)=>cleanText(x,40)).filter(Boolean).slice(0,20):[],verificationId,verificationStatus:'verified',verificationTimestamp:verification.verifiedAt||new Date().toISOString(),createdAt:now,updatedAt:now};
-  await saveAdRequest(env,item); const ids=await getAdIndex(env); await saveAdIndex(env,[id,...ids.filter(x=>x!==id)]); verification.status='consumed'; await env.NEWS_KV.put(`ad_verify:${verificationId}`,JSON.stringify(verification),{expirationTtl:Math.max(1,Math.ceil((verification.expiresAt-Date.now())/1000))});
+  await saveAdRequest(env,item); const ids=await getAdIndex(env); await saveAdIndex(env,[id,...ids.filter(x=>x!==id)]);
+  verification.requestId=id; verification.status='consumed'; verification.consumedAt=now;
+  await env.NEWS_KV.put(`ad_verify:${verificationId}`,JSON.stringify(verification),{expirationTtl:Math.max(1,Math.ceil((Number(verification.expiresAt)-Date.now())/1000))});
   return Response.json({success:true,requestId:id,status:item.status},{status:201,headers:HEADERS});
 }
 async function finalizeAdRequest(request:Request,env:Env,id:string){
   const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
   const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
   if(body.verificationId!==item.verificationId)return Response.json({success:false,message:'Invalid request session.'},{status:403,headers:HEADERS});
+  if(item.status==='pending_admin_review')return Response.json({success:true,requestId:id,status:item.status,alreadyFinalized:true},{headers:HEADERS});
   if(item.status!=='payment_submitted')return Response.json({success:false,message:'Payment submission is not ready for review.'},{status:409,headers:HEADERS});
   item.status='pending_admin_review'; item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item);
   return Response.json({success:true,requestId:id,status:item.status},{headers:HEADERS});
 }
 async function submitAdPayment(request:Request,env:Env,id:string){
   const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
-  if(!['payment_pending','payment_submitted'].includes(item.status))return Response.json({success:false,message:'This request is not accepting payment evidence.'},{status:409,headers:HEADERS});
   const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
   if(body.verificationId!==item.verificationId)return Response.json({success:false,message:'Invalid request session.'},{status:403,headers:HEADERS});
+  if(item.status==='payment_submitted'||item.status==='pending_admin_review')return Response.json({success:true,requestId:id,status:item.status,duplicate:true,message:'Payment evidence has already been submitted for this request.'},{status:200,headers:HEADERS});
+  if(item.status!=='payment_pending')return Response.json({success:false,message:'This request is not accepting payment evidence in its current status.'},{status:409,headers:HEADERS});
+  if(!(await rateLimit(env,'payment-submit',id,2,60*60*1000)))return Response.json({success:false,message:'Too many payment submission attempts for this request. Please try again later.'},{status:429,headers:HEADERS});
   const network=body?.network==='TRC20'?'TRC20':body?.network==='BEP20'?'BEP20':''; const walletAddress=network==='TRC20'?TRC20_ADDRESS:network==='BEP20'?BEP20_ADDRESS:''; const txid=cleanText(body?.txid,180);
   if(!network||!txid||!validImageData(body?.proof,MAX_PROOF_IMAGE,['image/jpeg','image/png','image/webp']))return Response.json({success:false,message:'Network, TXID and valid payment proof are required.'},{status:400,headers:HEADERS});
   if(!/^[A-Za-z0-9:_-]{8,180}$/.test(txid))return Response.json({success:false,message:'Invalid transaction ID format.'},{status:400,headers:HEADERS});
-  await env.NEWS_KV.put(adAssetKey(id,'proof'),String(body.proof)); item.paymentNetwork=network; item.walletAddress=walletAddress; item.txid=txid; item.payer=cleanText(body?.payer,100); item.note=cleanText(body?.note,1000); item.paymentProofKey=adAssetKey(id,'proof'); item.status='payment_submitted'; item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item);
+  await env.NEWS_KV.put(adAssetKey(id,'proof'),String(body.proof)); item.paymentNetwork=network; item.walletAddress=walletAddress; item.txid=txid; item.payer=cleanText(body?.payer,100); item.note=cleanText(body?.note,1000); item.paymentProofKey=adAssetKey(id,'proof'); item.paymentSubmittedAt=new Date().toISOString(); item.status='payment_submitted'; item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item);
   return Response.json({success:true,requestId:id,status:item.status,externalStep:PAYMENT_SMARTLINK},{headers:HEADERS});
 }
 function publicAdRequest(item:AdRequest){const {email,phone,website,sourceUrl,verificationId,verificationTimestamp,paymentProofKey,payer,note,txid,paymentNetwork,walletAddress,...safe}=item;return safe;}
@@ -280,6 +323,15 @@ export default {
         if(request.method!=='POST') return Response.json({success:false,message:'Method not allowed.'},{status:405,headers:{...HEADERS,'Allow':'POST, OPTIONS'}});
         return await createAdRequest(request,env);
       }
+      const adRequestGetMatch=path.match(/^\/api\/ads\/requests\/([^/]+)$/);
+      if(adRequestGetMatch && request.method==='GET'){
+        const id=decodeURIComponent(adRequestGetMatch[1]);
+        const verificationId=cleanText(url.searchParams.get('verificationId'),80);
+        const item=await getAdRequest(env,id);
+        if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
+        if(!verificationId||verificationId!==item.verificationId)return Response.json({success:false,message:'A valid request session is required.'},{status:403,headers:HEADERS});
+        return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
+      }
       const adPaymentMatch=path.match(/^\/api\/ads\/requests\/([^/]+)\/payment$/);
       if(adPaymentMatch && request.method==='POST') return await submitAdPayment(request,env,decodeURIComponent(adPaymentMatch[1]));
       const adFinalizeMatch=path.match(/^\/api\/ads\/requests\/([^/]+)\/finalize$/);
@@ -304,30 +356,68 @@ export default {
         }
 
         if(path==='/api/admin/advertisements' && request.method==='GET'){
-          const status=url.searchParams.get('status')||''; const ids=await getAdIndex(env); const list:AdRequest[]=[]; for(const id of ids){const item=await getAdRequest(env,id); if(item && (!status||item.status===status)) list.push(item);} return Response.json({success:true,data:list.map(item=>adminAdRequest(item)),total:list.length},{headers:HEADERS});
+          const status=url.searchParams.get('status')||'';
+          const query=cleanText(url.searchParams.get('q'),180).toLowerCase();
+          const sort=url.searchParams.get('sort')==='oldest'?'oldest':'newest';
+          const requestedPage=Math.max(1,Number(url.searchParams.get('page')||1)||1);
+          const requestedLimit=Math.min(100,Math.max(1,Number(url.searchParams.get('limit')||50)||50));
+          const ids=await getAdIndex(env); const allItems:AdRequest[]=[];
+          for(const id of ids){const item=await getAdRequest(env,id); if(item)allItems.push(item);}
+          const stats={total:allItems.length,pending:allItems.filter(x=>['payment_pending','payment_submitted','pending_admin_review'].includes(x.status)).length,paymentSubmitted:allItems.filter(x=>x.status==='payment_submitted').length,approved:allItems.filter(x=>x.status==='approved').length,published:allItems.filter(x=>x.status==='published').length,rejected:allItems.filter(x=>x.status==='rejected').length,unpublished:allItems.filter(x=>x.status==='unpublished').length};
+          const list=allItems.filter(item=>{const hay=`${item.id} ${item.title} ${item.email} ${item.phone} ${item.category} ${item.country} ${item.txid||''} ${item.paymentNetwork||''}`.toLowerCase(); return (!status||item.status===status)&&(!query||hay.includes(query));});
+          list.sort((a,b)=>sort==='oldest'?Date.parse(a.createdAt)-Date.parse(b.createdAt):Date.parse(b.createdAt)-Date.parse(a.createdAt));
+          const startIndex=(requestedPage-1)*requestedLimit;
+          return Response.json({success:true,data:list.slice(startIndex,startIndex+requestedLimit).map(item=>adminAdRequest(item)),total:list.length,page:requestedPage,limit:requestedLimit,pages:Math.max(1,Math.ceil(list.length/requestedLimit)),stats},{headers:HEADERS});
         }
         const adPathMatch=path.match(/^\/api\/admin\/advertisements\/([^/]+)$/);
         if(adPathMatch){
           const id=decodeURIComponent(adPathMatch[1]); const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
           if(request.method==='GET'){const proof=item.paymentProofKey?await env.NEWS_KV.get(item.paymentProofKey,'text'):undefined;return Response.json({success:true,data:adminAdRequest(item,proof)},{headers:HEADERS});}
           if(request.method==='PUT'){
+            if(!(await adminActionAllowed(env,request,'edit')))return Response.json({success:false,message:'Too many admin edit actions. Please try again later.'},{status:429,headers:HEADERS});
             const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
             const editable=['title','description','content','category','country','author','email','phone','website','sourceUrl','rejectionReason']; for(const key of editable) if(body[key]!==undefined) (item as any)[key]=key==='website'||key==='sourceUrl'?validUrl(cleanText(body[key],500)):cleanText(body[key],key==='content'?30000:500);
             if(Array.isArray(body.tags))item.tags=body.tags.map((x:any)=>cleanText(x,40)).filter(Boolean).slice(0,20);
-            item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item); return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
+            item.updatedAt=new Date().toISOString(); await saveAdRequest(env,item);
+            if(item.status==='published'){
+              const all=await getArticles(env); const idx=all.findIndex(a=>a.id===item.id); if(idx>=0){const current=all[idx]; all[idx]=normalizePublishedAd({title:item.title,description:item.description,content:item.content,image:`${WORKER_PUBLIC_URL}${item.image}`,category:item.category,country:item.country,author:item.author,tags:[...item.tags,'Sponsored','Advertisement']},current); all[idx].id=item.id; all[idx].isPublished=true; await saveArticles(env,all);}
+            }
+            return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
           }
-          if(request.method==='DELETE'){await env.NEWS_KV.delete?.(adKey(id)); await env.NEWS_KV.delete?.(adAssetKey(id,'main')); await env.NEWS_KV.delete?.(adAssetKey(id,'proof')); const ids=(await getAdIndex(env)).filter(x=>x!==id); await saveAdIndex(env,ids); return Response.json({success:true,message:'Advertisement request deleted.'},{headers:HEADERS});}
+          if(request.method==='DELETE'){
+            if(!(await adminActionAllowed(env,request,'delete')))return Response.json({success:false,message:'Too many admin delete actions. Please try again later.'},{status:429,headers:HEADERS});
+            await env.NEWS_KV.delete?.(adKey(id)); await env.NEWS_KV.delete?.(adAssetKey(id,'main')); await env.NEWS_KV.delete?.(adAssetKey(id,'proof')); const ids=(await getAdIndex(env)).filter(x=>x!==id); await saveAdIndex(env,ids);
+            const all=await getArticles(env); const filtered=all.filter(a=>a.id!==id); if(filtered.length!==all.length)await saveArticles(env,filtered);
+            return Response.json({success:true,message:'Advertisement request deleted.'},{headers:HEADERS});
+          }
         }
         const adActionMatch=path.match(/^\/api\/admin\/advertisements\/([^/]+)\/(approve|reject|unpublish)$/);
         if(adActionMatch && request.method==='POST'){
-          const id=decodeURIComponent(adActionMatch[1]); const action=adActionMatch[2]; const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
+          const id=decodeURIComponent(adActionMatch[1]); const action=adActionMatch[2];
+          if(!(await adminActionAllowed(env,request,action)))return Response.json({success:false,message:'Too many admin actions. Please try again later.'},{status:429,headers:HEADERS});
+          const item=await getAdRequest(env,id); if(!item)return Response.json({success:false,message:'Advertisement request not found.'},{status:404,headers:HEADERS});
           const body=await readJsonBody(request); if(body===null)return Response.json({success:false,message:'Invalid JSON request body.'},{status:400,headers:HEADERS});
-          if(action==='reject'){item.status='rejected';item.rejectionReason=cleanText(body?.reason,1000);item.updatedAt=new Date().toISOString();await saveAdRequest(env,item);return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});}
-          const all=await getArticles(env); const published=normalizePublishedAd({title:item.title,description:item.description,content:item.content,image:`${WORKER_PUBLIC_URL}${item.image}`,category:item.category,country:item.country,author:item.author,tags:[...item.tags,'Sponsored','Advertisement']});
-          if(action==='unpublish'){
-            const idx=all.findIndex(a=>a.id===item.id); if(idx>=0){all[idx].isPublished=false;await saveArticles(env,all);} item.status='approved';item.updatedAt=new Date().toISOString();await saveAdRequest(env,item);return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
+          const now=new Date().toISOString();
+          if(action==='reject'){
+            if(['published','unpublished'].includes(item.status))return Response.json({success:false,message:'A published or unpublished advertisement must be handled with its current publication state.'},{status:409,headers:HEADERS});
+            const reason=cleanText(body?.reason,1000); if(!reason)return Response.json({success:false,message:'A rejection reason is required.'},{status:400,headers:HEADERS});
+            item.status='rejected';item.rejectionReason=reason;item.rejectedAt=now;item.updatedAt=now;await saveAdRequest(env,item);
+            return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
           }
-          const uniqueSlug=all.some(a=>a.slug===published.slug)?`${published.slug}-${item.id.slice(0,8)}`:published.slug; published.slug=uniqueSlug; published.id=item.id; all.unshift(published); await saveArticles(env,all); item.status='published';item.approvedAt=new Date().toISOString();item.publishedAt=published.publishedAt;item.updatedAt=new Date().toISOString();await saveAdRequest(env,item); return Response.json({success:true,data:publicAdRequest(item),article:published},{headers:HEADERS});
+          if(action==='unpublish'){
+            if(item.status!=='published')return Response.json({success:false,message:'Only a published advertisement can be unpublished.'},{status:409,headers:HEADERS});
+            const all=await getArticles(env); const idx=all.findIndex(a=>a.id===item.id); if(idx>=0){all[idx].isPublished=false;await saveArticles(env,all);}
+            item.status='unpublished';item.updatedAt=now;await saveAdRequest(env,item);return Response.json({success:true,data:publicAdRequest(item)},{headers:HEADERS});
+          }
+          if(!['payment_submitted','pending_admin_review','approved','unpublished'].includes(item.status))return Response.json({success:false,message:'This advertisement is not ready for admin approval.'},{status:409,headers:HEADERS});
+          const all=await getArticles(env);
+          const existingIndex=all.findIndex(a=>a.id===item.id);
+          const current=existingIndex>=0?all[existingIndex]:undefined;
+          const published=normalizePublishedAd({title:item.title,description:item.description,content:item.content,image:`${WORKER_PUBLIC_URL}${item.image}`,category:item.category,country:item.country,author:item.author,tags:[...item.tags,'Sponsored','Advertisement']},current);
+          published.id=item.id; published.isPublished=true; published.publishedAt=current?.publishedAt||now;
+          if(existingIndex>=0)all[existingIndex]=published; else {const slugTaken=all.some(a=>a.slug===published.slug); if(slugTaken)published.slug=`${published.slug}-${item.id.slice(0,8)}`; all.unshift(published);}
+          await saveArticles(env,all); item.status='published';item.approvedAt=item.approvedAt||now;item.publishedAt=published.publishedAt;item.updatedAt=now;await saveAdRequest(env,item);
+          return Response.json({success:true,data:publicAdRequest(item),article:published},{headers:HEADERS});
         }
 
         if(path==='/api/admin/articles' && request.method==='GET'){

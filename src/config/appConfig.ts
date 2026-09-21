@@ -9,7 +9,7 @@ export const APP_CONFIG = {
   edition: 'International Edition',
   apiBaseUrl: (import.meta.env.VITE_NEWS_API_URL || 'https://globalnews-news-collector.hafejnayem1743.workers.dev').replace(/\/$/, ''),
   useDemoData: import.meta.env.VITE_USE_DEMO_DATA === 'true',
-  version: '2.0.0',
+  version: '2.1.0',
 };
 
 export const CATEGORIES_CONFIG: Array<{

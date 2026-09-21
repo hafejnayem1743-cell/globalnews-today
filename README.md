@@ -82,3 +82,22 @@ Set secrets with Cloudflare Wrangler or the Cloudflare Dashboard Variables and S
 - Admin advertisement review, edit, approve/publish, reject, unpublish and cancel controls.
 - Approved paid posts are labelled `Sponsored` and use the normal GlobalNews Today article layout.
 - No payment is auto-approved from a Smartlink visit, countdown, screenshot upload or client-side flag.
+
+## v2.1 Advertisement System Audit & Fixes
+
+- Separated verification-start, verification-confirm, advertisement-create, payment-submit, and admin-sensitive rate-limit buckets.
+- Fixed KV rate-limit TTL handling so expiration is never written as zero/negative.
+- Added verification-session replay/idempotency handling and request recovery after duplicate submissions.
+- Added server-side advertisement request GET using the matching verification session.
+- Added server-side advertisement state-transition checks.
+- Added real advertisement dashboard statistics, search, filtering, sorting, pagination, and request detail review.
+- Added private admin-only payment proof viewing; payment proof is never exposed by public APIs.
+- Added explicit reject reason requirement, safe unpublish behavior, and article removal on delete.
+- Approved advertisements continue to use the normal article system with `Sponsored` and `Advertisement` tags.
+- Preserved the existing Worker name, KV namespace, cron collector, admin authentication, public news APIs, routing, SEO, and Adsterra integration.
+
+### Validation
+
+- Worker TypeScript compile check: passed.
+- Frontend TS/TSX syntax/transpile check: passed for all source files.
+- Full `npm install --legacy-peer-deps` / `npm run build` could not be completed in the build environment because npm dependency installation timed out twice; this is an environment/network limitation, not a claimed successful frontend build.
